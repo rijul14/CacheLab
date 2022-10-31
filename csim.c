@@ -59,35 +59,50 @@ static void parse_arguments(int argc, char **argv) {
                 break;
             case 'K':
                 // TODO
+                K = atoi(optarg);
                 break;
             case 'B':
                 // TODO
+                B = atoi(optarg);
+                if (NOT_POWER2(B)) {
+                    fprintf(stderr, "ERROR: B must be a power of 2\n");
+                    exit(1);
+                }
                 break;
             case 'p':
                 if (!strcmp(optarg, "FIFO")) {
                     policy = FIFO;
                 }
                 // TODO: parse LRU, exit with error for unknown policy
-                break;
-            case 't':
-                // TODO: open file trace_fp for reading
-                if (!trace_fp) {
-                    fprintf(stderr, "ERROR: %s: %s\n", optarg, strerror(errno));
+                else if (!strcmp(optarg, "LRU")) {
+                    policy = LRU;
+                }
+                else {
+                    fprintf(stderr, "ERROR: p must be either LRU or FIFO");
                     exit(1);
                 }
                 break;
+            case 't':
+                // TODO: open file trace_fp for reading
+                trace_fp = fopen(optarg,"r");
+                if (!trace_fp) {
+                    fprintf(stderr, "ERROR: %s: %s\n", optarg, strerror(errno));
+                    exit(1);
+                }                
+                break;
             case 'v':
                 // TODO
+                verbose = 1;
                 break;
             case 'h':
                 // TODO
+                print_usage();
                 exit(0);
             default:
                 print_usage();
                 exit(1);
         }
     }
-
     /* Make sure that all required command line args were specified and valid */
     if (S <= 0 || K <= 0 || B <= 0 || policy == 0 || !trace_fp) {
         printf("ERROR: Negative or missing command line arguments\n");
@@ -108,10 +123,11 @@ static void parse_arguments(int argc, char **argv) {
  * Cache data structures
  * TODO: Define your own!
  */
+struct cacheline {
+    int tag, valid, numops;
+} *cacheline;
 
-
-
-
+struct cacheline** sets;
 
 
 /**
@@ -123,9 +139,17 @@ static void parse_arguments(int argc, char **argv) {
  * TODO: Implement
  */
 static void allocate_cache() {
-
-
-
+    sets = (struct cacheline**)malloc(sizeof(struct cacheline*)*S);
+    for (int i = 0; i < S; ++i) {
+        sets[i] = (struct cacheline*)malloc(sizeof(struct cacheline)*K);
+    }
+    for (int i = 0; i < S; ++i) {
+        for (int j = 0; j < K; ++j) {
+            sets[i][j].tag = 0;
+            sets[i][j].valid = 0;
+            sets[i][j].numops = 0;
+        }
+    }
 }
 
 /**
@@ -137,9 +161,10 @@ static void allocate_cache() {
  * TODO: Implement
  */
 static void free_cache() {
-
-
-
+    for (int i = 0; i < S; ++i) {
+        free(sets[i]);
+    }
+    free(sets);
 }
 
 /* Counters used to record cache statistics */
@@ -158,9 +183,48 @@ int eviction_count = 0;
  * TODO: Implement
  */
 static void access_data(unsigned long addr) {
-    printf("Access to %016lx\n", addr);
-
-
+    int b = INT_LOG2(B);
+    int s = INT_LOG2(S);
+    int set_ind, t;
+    set_ind = (int) ((addr >> b) & ((1L << s) - 1));
+    t = (int) (addr >> (b + s));
+    for (int i = 0; i < K; ++i) {
+        if ((sets[set_ind][i].tag == t) && sets[set_ind][i].valid) {
+            hit_count++;
+            if (policy == LRU) {
+                for (int j = 0; j < K; ++j) {
+                    sets[set_ind][j].numops--;
+                }
+                sets[set_ind][i].numops = K;
+            }
+            if (verbose) {
+                printf("hit ");
+            }
+            return;
+        }
+    }
+    miss_count++;
+    if (verbose) {
+        printf("miss ");
+    }
+    int lowind = 0;
+    for (int k = 0; k < K; ++k) {
+        if (sets[set_ind][k].numops < sets[set_ind][lowind].numops) {
+            lowind = k;
+        }
+    }
+    for (int j = 0; j < K; ++j) {
+        sets[set_ind][j].numops--;
+    }
+    sets[set_ind][lowind].numops = K;
+    if (sets[set_ind][lowind].valid) {
+        eviction_count++;
+        if (verbose) {
+            printf("eviction ");
+        }
+    }
+    sets[set_ind][lowind].tag = t;
+    sets[set_ind][lowind].valid = 1;
 }
 
 /**
@@ -176,9 +240,50 @@ static void access_data(unsigned long addr) {
  * TODO: Implement
  */
 static void replay_trace() {
-    access_data(0);
-
-
+    char op;
+    unsigned int bytes;
+    unsigned long add;    
+    while (fscanf(trace_fp,"%c",&op) != EOF) {
+        if (op == ' ') {
+            if ((fscanf(trace_fp,"%c",&op) != EOF)) {
+                if (op == 'M' || op == 'L' || op == 'S') {
+                    fscanf(trace_fp,"%lx,%u",&add,&bytes);
+                    if (verbose) {
+                        printf("%c %lx,%u ",op,add,bytes);
+                    }
+                    if (op == 'L') {
+                        access_data(add);
+                        for (unsigned long m = add + 1; m < (add + bytes); ++m) {
+                            if (m % B == 0) {
+                                access_data(m);
+                            }
+                        }
+                    }
+                    else if (op == 'S') {
+                        access_data(add);
+                        for (unsigned long m = add + 1; m < (add + bytes); ++m) {
+                            if (m % B == 0) {
+                                access_data(m);
+                            }
+                        }
+                    }
+                    else if (op == 'M') {
+                        access_data(add);
+                        access_data(add);
+                        for (unsigned long m = add + 1; m < (add + bytes); ++m) {
+                            if (m % B == 0) {
+                                access_data(m);
+                                access_data(m);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (verbose && (op == 'M' || op == 'L' || op == 'S')) {
+            printf("\n");
+        }
+    }
 }
 
 /**
